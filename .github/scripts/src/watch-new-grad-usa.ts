@@ -1,147 +1,133 @@
-import fs from "fs/promises";
+import fs from "fs";
 import path from "path";
-import crypto from "crypto";
 import nodemailer from "nodemailer";
+import dotenv from "dotenv";
 
-// Path to the file we want to monitor
-const NEW_GRAD_PATH = path.resolve(__dirname, "../../../NEW_GRAD_USA.md");
+dotenv.config();
 
-// Directory to store previously seen job IDs
-const STATE_DIR = path.resolve(__dirname, "../state");
-const STATE_FILE = path.join(STATE_DIR, "seen-newgrad-usa.json");
-
-// Create a unique ID based on each job row
-function computeJobId(line: string): string {
-  return crypto.createHash("sha256").update(line).digest("hex").slice(0, 16);
+interface Job {
+  company: string;
+  role: string;
+  location: string;
+  salary: string;
+  apply: string;
+  posted: string;
 }
 
-async function ensureStateDir() {
-  await fs.mkdir(STATE_DIR, { recursive: true });
-}
+// Convert “18d” / “0d” / “3d” / “12h” → minutes
+function postedToMinutes(value: string): number {
+  value = value.trim().toLowerCase();
 
-async function loadSeenIds(): Promise<Set<string>> {
-  try {
-    const raw = await fs.readFile(STATE_FILE, "utf8");
-    const arr: string[] = JSON.parse(raw);
-    return new Set(arr);
-  } catch {
-    return new Set();
+  if (value.endsWith("h")) {
+    return parseInt(value) * 60;
   }
+  if (value.endsWith("d")) {
+    return parseInt(value) * 1440;
+  }
+  if (value.endsWith("m")) {
+    return parseInt(value);
+  }
+
+  return 999999; // fallback
 }
 
-async function saveSeenIds(ids: Set<string>) {
-  const arr = Array.from(ids);
-  await fs.writeFile(STATE_FILE, JSON.stringify(arr, null, 2), "utf8");
-}
-
-// Extract all job rows from NEW_GRAD_USA.md tables
-function extractJobLines(markdown: string): string[] {
-  const lines = markdown.split(/\r?\n/);
-  const jobs: string[] = [];
-
-  let inTable = false;
+// Parse Markdown table rows
+function parseJobs(md: string): Job[] {
+  const lines = md.split("\n").filter(l => l.includes("|"));
+  const jobs: Job[] = [];
 
   for (const line of lines) {
-    if (
-      line.includes("<!-- TABLE_FAANG_START -->") ||
-      line.includes("<!-- TABLE_QUANT_START -->") ||
-      line.trim() === "<!-- TABLE_START -->"
-    ) {
-      inTable = true;
-      continue;
-    }
+    const cells = line.split("|").map(c => c.trim());
+    if (cells.length < 7) continue;
 
-    if (
-      line.includes("<!-- TABLE_FAANG_END -->") ||
-      line.includes("<!-- TABLE_QUANT_END -->") ||
-      line.trim() === "<!-- TABLE_END -->"
-    ) {
-      inTable = false;
-      continue;
-    }
+    try {
+      const company = cells[1].replace(/<[^>]*>/g, "");
+      const role = cells[2];
+      const location = cells[3];
+      const salary = cells[4];
+      const applyLinkMatch = cells[5].match(/href="([^"]+)"/);
+      const posted = cells[6];
 
-    if (!inTable) continue;
-
-    const trimmed = line.trim();
-    if (trimmed.startsWith("|") && trimmed.includes("<a href=")) {
-      jobs.push(trimmed);
-    }
+      jobs.push({
+        company,
+        role,
+        location,
+        salary,
+        apply: applyLinkMatch ? applyLinkMatch[1] : "",
+        posted,
+      });
+    } catch { }
   }
 
   return jobs;
 }
 
-type JobRow = {
-  id: string;
-  line: string;
-};
-
-function parseJobs(markdown: string): JobRow[] {
-  const lines = extractJobLines(markdown);
-  return lines.map((line) => ({
-    id: computeJobId(line),
-    line,
-  }));
-}
-
-// SEND EMAIL WHEN NEW JOBS APPEAR
-async function sendEmail(newJobs: JobRow[]) {
-  const user = process.env.EMAIL_USER;
-  const pass = process.env.EMAIL_PASS;
-  const to = process.env.EMAIL_TO || user;
-
-  if (!user || !pass || !to) {
-    console.log("Missing EMAIL_USER / EMAIL_PASS / EMAIL_TO. Cannot send email.");
-    return;
-  }
-
+// Send email using Gmail
+async function sendEmail(html: string) {
   const transporter = nodemailer.createTransport({
     service: "gmail",
     auth: {
-      user,
-      pass,
+      user: process.env.EMAIL_USER!,
+      pass: process.env.EMAIL_PASS!,
     },
   });
 
-  const subject = `[New Grad USA] ${newJobs.length} new job${newJobs.length > 1 ? "s" : ""} found`;
-  const textBody = newJobs.map((j) => `• ${j.line}`).join("\n");
-
   await transporter.sendMail({
-    from: user,
-    to,
-    subject,
-    text: textBody,
+    from: `"Job Alerts" <${process.env.EMAIL_USER}>`,
+    to: process.env.EMAIL_USER,
+    subject: "🔥 New AI New Grad USA Jobs (Last 1 Hour)",
+    html,
   });
-
-  console.log(`Email sent to ${to} for ${newJobs.length} jobs.`);
 }
 
-// MAIN FUNCTION
+function buildTable(jobs: Job[]): string {
+  let table = `
+  <h2>🔥 New Jobs Posted in the Last 1 Hour</h2>
+  <table border="1" cellpadding="6" style="border-collapse: collapse;">
+    <tr>
+      <th>Company</th>
+      <th>Role</th>
+      <th>Location</th>
+      <th>Salary</th>
+      <th>Apply</th>
+      <th>Posted</th>
+    </tr>
+  `;
+
+  for (const job of jobs) {
+    table += `
+      <tr>
+        <td>${job.company}</td>
+        <td>${job.role}</td>
+        <td>${job.location}</td>
+        <td>${job.salary}</td>
+        <td><a href="${job.apply}">Apply</a></td>
+        <td>${job.posted}</td>
+      </tr>
+    `;
+  }
+
+  table += "</table>";
+  return table;
+}
+
 async function main() {
-  await ensureStateDir();
+  const mdPath = path.join(process.cwd(), "../../NEW_GRAD_USA.md");
+  const mdText = fs.readFileSync(mdPath, "utf-8");
 
-  const markdown = await fs.readFile(NEW_GRAD_PATH, "utf8");
-  const jobs = parseJobs(markdown);
+  const jobs = parseJobs(mdText);
 
-  const seen = await loadSeenIds();
-  const newJobs = jobs.filter((j) => !seen.has(j.id));
+  const newJobs = jobs.filter(job => postedToMinutes(job.posted) <= 60);
 
   if (newJobs.length === 0) {
-    console.log("No new jobs found.");
+    console.log("No new jobs posted in the last hour.");
     return;
   }
 
-  console.log(`Found ${newJobs.length} new job(s).`);
+  const html = buildTable(newJobs);
+  await sendEmail(html);
 
-  // Save new jobs
-  newJobs.forEach((j) => seen.add(j.id));
-  await saveSeenIds(seen);
-
-  // Send email
-  await sendEmail(newJobs);
+  console.log(`Sent ${newJobs.length} new job alerts.`);
 }
 
-main().catch((err) => {
-  console.error("Error in watcher:", err);
-  process.exit(1);
-});
+main();
