@@ -2,32 +2,33 @@ name: Watch New Grad USA and Send Email
 
 on:
   schedule:
-    - cron: "0 * * * *" # Runs every hour (UTC)
+    - cron: "*/30 * * * *" # Runs every 30 minutes
   workflow_dispatch: # Allows manual run
 
 jobs:
-  watcher:
+  watch:
     runs-on: ubuntu-latest
 
-    defaults:
-      run:
-        working-directory: .github/scripts
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
         with:
-          node-version: 20
+          node-version: 18
 
       - name: Install dependencies
-        run: npm ci
+        working-directory: .github/scripts
+        run: npm install
 
-      - name: Run New Grad USA Watcher
+      - name: Build TypeScript
+        working-directory: .github/scripts
+        run: npm run build
+
+      - name: Run Watcher Script (New Jobs Filter)
+        working-directory: .github/scripts
         env:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        run: npm run watch-new-grad-usa
+        run: node build/watch-new-grad-usa.js
